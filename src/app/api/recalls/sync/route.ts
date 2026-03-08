@@ -256,69 +256,76 @@ async function fetchNHTSARecalls(): Promise<NormalizedRecall[]> {
 }
 
 /**
- * POST /api/recalls/sync
- *
- * Cron-triggered endpoint that fetches latest recalls from
- * CPSC, FDA, and NHTSA APIs and upserts them into the database.
+ * Shared sync logic used by both GET (Vercel cron) and POST handlers.
  */
-export async function POST(request: NextRequest) {
-  try {
-    // Verify cron secret (optional security measure)
-    const authHeader = request.headers.get("authorization");
-    const cronSecret = process.env.CRON_SECRET;
-    if (cronSecret && authHeader !== `Bearer ${cronSecret}`) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
+async function runSync(request: NextRequest) {
+  // Verify cron secret (optional security measure)
+  const authHeader = request.headers.get("authorization");
+  const cronSecret = process.env.CRON_SECRET;
+  if (cronSecret && authHeader !== `Bearer ${cronSecret}`) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
 
-    const supabase = getServiceClient();
+  const supabase = getServiceClient();
 
-    // Fetch from all agencies in parallel
-    const [cpscRecalls, fdaRecalls, nhtsaRecalls] = await Promise.all([
-      fetchCPSCRecalls(),
-      fetchFDARecalls(),
-      fetchNHTSARecalls(),
-    ]);
+  // Fetch from all agencies in parallel
+  const [cpscRecalls, fdaRecalls, nhtsaRecalls] = await Promise.all([
+    fetchCPSCRecalls(),
+    fetchFDARecalls(),
+    fetchNHTSARecalls(),
+  ]);
 
-    const allRecalls = [...cpscRecalls, ...fdaRecalls, ...nhtsaRecalls];
+  const allRecalls = [...cpscRecalls, ...fdaRecalls, ...nhtsaRecalls];
 
-    if (allRecalls.length === 0) {
-      return NextResponse.json({
-        message: "No new recalls fetched",
-        counts: { cpsc: 0, fda: 0, nhtsa: 0 },
-      });
-    }
-
-    // Upsert in batches of 500 to stay within request size limits
-    const batchSize = 500;
-    let upsertErrors = 0;
-    for (let i = 0; i < allRecalls.length; i += batchSize) {
-      const batch = allRecalls.slice(i, i + batchSize);
-      const { error } = await supabase.from("active_recalls").upsert(batch, {
-        onConflict: "agency_id",
-        ignoreDuplicates: false,
-      });
-      if (error) {
-        console.error(`Failed to upsert batch ${i / batchSize + 1}:`, error);
-        upsertErrors++;
-      }
-    }
-
-    if (upsertErrors > 0) {
-      return NextResponse.json(
-        { error: `${upsertErrors} batch(es) failed during upsert` },
-        { status: 500 }
-      );
-    }
-
+  if (allRecalls.length === 0) {
     return NextResponse.json({
-      message: "Recall sync completed",
-      counts: {
-        cpsc: cpscRecalls.length,
-        fda: fdaRecalls.length,
-        nhtsa: nhtsaRecalls.length,
-        total: allRecalls.length,
-      },
+      message: "No new recalls fetched",
+      counts: { cpsc: 0, fda: 0, nhtsa: 0 },
     });
+  }
+
+  // Upsert in batches of 500 to stay within request size limits
+  const batchSize = 500;
+  let upsertErrors = 0;
+  for (let i = 0; i < allRecalls.length; i += batchSize) {
+    const batch = allRecalls.slice(i, i + batchSize);
+    const { error } = await supabase.from("active_recalls").upsert(batch, {
+      onConflict: "agency_id",
+      ignoreDuplicates: false,
+    });
+    if (error) {
+      console.error(`Failed to upsert batch ${i / batchSize + 1}:`, error);
+      upsertErrors++;
+    }
+  }
+
+  if (upsertErrors > 0) {
+    return NextResponse.json(
+      { error: `${upsertErrors} batch(es) failed during upsert` },
+      { status: 500 }
+    );
+  }
+
+  return NextResponse.json({
+    message: "Recall sync completed",
+    counts: {
+      cpsc: cpscRecalls.length,
+      fda: fdaRecalls.length,
+      nhtsa: nhtsaRecalls.length,
+      total: allRecalls.length,
+    },
+  });
+}
+
+/**
+ * GET /api/recalls/sync
+ *
+ * Vercel cron handler — runs the sync on schedule.
+ * Set CRON_SECRET to secure this endpoint.
+ */
+export async function GET(request: NextRequest) {
+  try {
+    return await runSync(request);
   } catch (error) {
     console.error("Recall sync error:", error);
     return NextResponse.json(
@@ -328,16 +335,19 @@ export async function POST(request: NextRequest) {
   }
 }
 
-// Also support GET for easy testing
-export async function GET() {
-  return NextResponse.json({
-    message: "Use POST to trigger recall sync",
-    endpoints: {
-      cpsc: "https://www.saferproducts.gov/RestWebServices/Recall",
-      fda_food: "https://api.fda.gov/food/enforcement.json",
-      fda_drug: "https://api.fda.gov/drug/enforcement.json",
-      fda_device: "https://api.fda.gov/device/enforcement.json",
-      nhtsa: "https://api.nhtsa.gov/recalls/recallsByVehicle",
-    },
-  });
+/**
+ * POST /api/recalls/sync
+ *
+ * Manual trigger for recall sync.
+ */
+export async function POST(request: NextRequest) {
+  try {
+    return await runSync(request);
+  } catch (error) {
+    console.error("Recall sync error:", error);
+    return NextResponse.json(
+      { error: "Internal server error" },
+      { status: 500 }
+    );
+  }
 }
