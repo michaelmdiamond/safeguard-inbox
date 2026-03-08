@@ -42,15 +42,24 @@ async function fetchCPSCRecalls(): Promise<
     if (!response.ok) return [];
     const data: CPSCRecall[] = await response.json();
 
-    return data.slice(0, 100).map((recall) => ({
-      agency_source: "CPSC",
-      agency_id: recall.RecallNumber || `CPSC-${recall.RecallID}`,
-      title: recall.Title || recall.Description?.slice(0, 200) || "Unknown",
-      description: recall.Description || "",
-      affected_models: recall.Products?.map((p) => p.Model).filter(Boolean) || [],
-      recall_date: recall.RecallDate || new Date().toISOString().split("T")[0],
-      remedy_url: recall.URL || "",
-    }));
+    return data.map((recall) => {
+      // Collect model numbers and product names for matching.
+      // Many CPSC products have no Model — the product Name is the
+      // only searchable identifier (e.g. "Graco 4Ever DLX Car Seat").
+      const models = (recall.Products ?? []).map((p) => p.Model).filter(Boolean);
+      const names = (recall.Products ?? []).map((p) => p.Name).filter(Boolean);
+      const affected = [...new Set([...models, ...names])];
+
+      return {
+        agency_source: "CPSC",
+        agency_id: recall.RecallNumber || `CPSC-${recall.RecallID}`,
+        title: recall.Title || recall.Description?.slice(0, 200) || "Unknown",
+        description: recall.Description || "",
+        affected_models: affected,
+        recall_date: recall.RecallDate || new Date().toISOString().split("T")[0],
+        remedy_url: recall.URL || "",
+      };
+    });
   } catch (error) {
     console.error("CPSC fetch error:", error);
     return [];
@@ -74,7 +83,7 @@ async function fetchFDARecalls(): Promise<
 > {
   try {
     const response = await fetch(
-      "https://api.fda.gov/food/enforcement.json?limit=50&sort=recall_initiation_date:desc",
+      "https://api.fda.gov/food/enforcement.json?limit=200&sort=recall_initiation_date:desc",
       { next: { revalidate: 86400 } }
     );
 
