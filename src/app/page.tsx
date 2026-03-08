@@ -8,6 +8,7 @@ import {
   CheckCircle,
   ArrowRight,
   ShieldCheck,
+  Search,
 } from "lucide-react";
 
 export default function LandingPage() {
@@ -21,6 +22,12 @@ export default function LandingPage() {
             <span className="text-xl font-bold text-primary">SafeGuard Inbox</span>
           </div>
           <div className="flex items-center gap-3">
+            <Link
+              href="/lookup"
+              className="text-sm font-medium text-foreground/70 hover:text-foreground transition-colors"
+            >
+              Product Lookup
+            </Link>
             <Link
               href="/login"
               className="text-sm font-medium text-foreground/70 hover:text-foreground transition-colors"
@@ -65,10 +72,11 @@ export default function LandingPage() {
                 <ArrowRight className="h-4 w-4" />
               </Link>
               <Link
-                href="/login"
-                className="inline-flex h-12 w-full items-center justify-center rounded-lg border border-border px-8 text-base font-medium text-foreground hover:bg-accent transition-colors sm:w-auto"
+                href="/lookup"
+                className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-lg border border-border px-8 text-base font-medium text-foreground hover:bg-accent transition-colors sm:w-auto"
               >
-                Sign In
+                <Search className="h-4 w-4" />
+                Check a Product Now
               </Link>
             </div>
           </div>

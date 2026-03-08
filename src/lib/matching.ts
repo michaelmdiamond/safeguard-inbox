@@ -1,8 +1,16 @@
 import { distance } from "fastest-levenshtein";
-import type { InventoryItem, ActiveRecall, MatchResult } from "@/types/database";
+import type {
+  InventoryItem,
+  ActiveRecall,
+  MatchResult,
+  ProductLookupQuery,
+  ProductLookupResult,
+  ConfidenceLevel,
+} from "@/types/database";
 
 const AUTO_ALERT_THRESHOLD = 0.85;
 const REVIEW_THRESHOLD = 0.65;
+const LOOKUP_THRESHOLD = 0.35;
 
 /**
  * Calculate normalized Levenshtein similarity between two strings.
@@ -119,4 +127,98 @@ export function getSeverity(score: number): "high" | "medium" | "low" {
   return "low";
 }
 
-export { AUTO_ALERT_THRESHOLD, REVIEW_THRESHOLD };
+/**
+ * Map a numeric score to a human-readable confidence level.
+ */
+export function getConfidence(score: number): ConfidenceLevel {
+  if (score >= 0.8) return "high";
+  if (score >= 0.55) return "medium";
+  return "low";
+}
+
+/**
+ * Score how well a free-text product query matches a single recall.
+ * Uses word overlap, model matching, and Levenshtein similarity.
+ */
+function scoreQueryAgainstRecall(
+  query: ProductLookupQuery,
+  recall: ActiveRecall
+): { score: number; match_type: MatchResult["match_type"] } {
+  const queryLower = query.query.toLowerCase();
+  const recallText =
+    `${recall.title} ${recall.description || ""} ${recall.affected_models.join(" ")}`.toLowerCase();
+
+  // --- Model number matching ---
+  let modelScore = 0;
+  if (query.model_number && recall.affected_models.length > 0) {
+    modelScore = matchModelNumber(query.model_number, recall.affected_models);
+  }
+
+  // --- Word overlap ---
+  const queryWords = queryLower
+    .split(/\s+/)
+    .filter((w) => w.length > 2);
+  const recallWords = new Set(recallText.split(/\s+/));
+  const matchingWords = queryWords.filter((w) => recallWords.has(w));
+  const wordOverlap =
+    queryWords.length > 0 ? matchingWords.length / queryWords.length : 0;
+
+  // --- Substring presence ---
+  // Check if any meaningful query token appears as a substring in the recall text
+  const substringHits = queryWords.filter(
+    (w) => w.length > 3 && recallText.includes(w)
+  );
+  const substringScore =
+    queryWords.length > 0 ? substringHits.length / queryWords.length : 0;
+
+  // --- Levenshtein on title ---
+  const titleSim = levenshteinSimilarity(queryLower, recall.title.toLowerCase());
+
+  // --- Combine ---
+  let finalScore: number;
+  let matchType: MatchResult["match_type"];
+
+  if (modelScore > 0.8) {
+    finalScore = modelScore * 0.6 + (wordOverlap * 0.2 + substringScore * 0.1 + titleSim * 0.1);
+    matchType = "model_number";
+  } else if (modelScore > 0) {
+    finalScore = modelScore * 0.4 + (wordOverlap * 0.25 + substringScore * 0.2 + titleSim * 0.15);
+    matchType = "combined";
+  } else {
+    finalScore = wordOverlap * 0.4 + substringScore * 0.35 + titleSim * 0.25;
+    matchType = "semantic";
+  }
+
+  return { score: finalScore, match_type: matchType };
+}
+
+/**
+ * Search recalls for a free-text product query.
+ * Returns matches above the lookup threshold, sorted by score,
+ * each annotated with a confidence level.
+ */
+export function lookupProduct(
+  query: ProductLookupQuery,
+  recalls: ActiveRecall[]
+): ProductLookupResult[] {
+  if (!query.query.trim() && !query.model_number?.trim()) return [];
+
+  const results: ProductLookupResult[] = [];
+
+  for (const recall of recalls) {
+    const { score, match_type } = scoreQueryAgainstRecall(query, recall);
+
+    if (score >= LOOKUP_THRESHOLD) {
+      results.push({
+        recall,
+        score,
+        confidence: getConfidence(score),
+        match_type,
+      });
+    }
+  }
+
+  return results.sort((a, b) => b.score - a.score);
+}
+
+export { AUTO_ALERT_THRESHOLD, REVIEW_THRESHOLD, LOOKUP_THRESHOLD };

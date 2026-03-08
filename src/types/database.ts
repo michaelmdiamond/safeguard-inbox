@@ -56,3 +56,17 @@ export interface MatchResult {
   score: number;
   match_type: "model_number" | "semantic" | "combined";
 }
+
+export type ConfidenceLevel = "high" | "medium" | "low";
+
+export interface ProductLookupQuery {
+  query: string;
+  model_number?: string;
+}
+
+export interface ProductLookupResult {
+  recall: ActiveRecall;
+  score: number;
+  confidence: ConfidenceLevel;
+  match_type: MatchResult["match_type"];
+}
