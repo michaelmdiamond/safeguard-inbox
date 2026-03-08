@@ -13,9 +13,28 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "SafeGuard Inbox - Product Recall Safety Hub for Parents",
+  title: {
+    default: "SafeGuard Inbox — Product Recall Safety Hub for Parents",
+    template: "%s — SafeGuard Inbox",
+  },
   description:
     "Automatically monitor your purchases for product recalls. Forward receipts, get instant alerts from CPSC, FDA, USDA, and NHTSA.",
+  metadataBase: new URL(
+    process.env.NEXT_PUBLIC_APP_URL || "https://safeguard-inbox.vercel.app"
+  ),
+  openGraph: {
+    title: "SafeGuard Inbox — Product Recall Safety Hub for Parents",
+    description:
+      "Automatically monitor your purchases for product recalls. Forward receipts, get instant alerts from CPSC, FDA, USDA, and NHTSA.",
+    type: "website",
+    siteName: "SafeGuard Inbox",
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "SafeGuard Inbox — Product Recall Safety Hub for Parents",
+    description:
+      "Automatically monitor your purchases for product recalls. Forward receipts, get instant alerts.",
+  },
 };
 
 export default function RootLayout({

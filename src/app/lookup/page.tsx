@@ -51,6 +51,17 @@ const confidenceConfig: Record<
   low: { label: "Low Confidence", variant: "secondary", icon: ShieldQuestion },
 };
 
+const suggestions = [
+  { label: "Baby strollers", query: "baby stroller" },
+  { label: "Car seats", query: "car seat" },
+  { label: "Infant formula", query: "infant formula" },
+  { label: "Cribs", query: "crib" },
+  { label: "High chairs", query: "high chair" },
+  { label: "Baby monitors", query: "baby monitor" },
+  { label: "Toys", query: "children toys" },
+  { label: "Dressers", query: "dresser chest" },
+];
+
 export default function LookupPage() {
   const [query, setQuery] = useState("");
   const [modelNumber, setModelNumber] = useState("");
@@ -177,6 +188,24 @@ export default function LookupPage() {
                   </>
                 )}
               </Button>
+
+              {!searched && (
+                <div className="pt-2">
+                  <p className="text-xs text-muted-foreground mb-2">Popular searches:</p>
+                  <div className="flex flex-wrap gap-2">
+                    {suggestions.map((s) => (
+                      <button
+                        key={s.label}
+                        type="button"
+                        onClick={() => setQuery(s.query)}
+                        className="inline-flex items-center rounded-full border border-border bg-background px-3 py-1 text-xs font-medium text-muted-foreground hover:bg-accent hover:text-foreground transition-colors cursor-pointer"
+                      >
+                        {s.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
             </form>
           </CardContent>
         </Card>
@@ -323,6 +352,19 @@ export default function LookupPage() {
           </div>
         )}
       </div>
+
+      {/* Footer */}
+      <footer className="mt-16 border-t border-border">
+        <div className="mx-auto flex max-w-4xl flex-col items-center justify-between gap-4 px-4 py-8 sm:flex-row sm:px-6 lg:px-8">
+          <Link href="/" className="flex items-center gap-2">
+            <Shield className="h-4 w-4 text-primary" />
+            <span className="text-sm font-semibold text-primary">SafeGuard Inbox</span>
+          </Link>
+          <p className="text-xs text-muted-foreground">
+            © {new Date().getFullYear()} SafeGuard Inbox. All rights reserved.
+          </p>
+        </div>
+      </footer>
     </div>
   );
 }
