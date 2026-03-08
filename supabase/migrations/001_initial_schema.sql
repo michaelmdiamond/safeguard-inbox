@@ -1,10 +1,9 @@
 -- Enable required extensions
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS "vector";
 
 -- Table: User Inventory (Extracted from Receipts)
 CREATE TABLE user_inventory (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID REFERENCES auth.users NOT NULL,
     brand TEXT NOT NULL,
     product_name TEXT NOT NULL,
@@ -17,7 +16,7 @@ CREATE TABLE user_inventory (
 
 -- Table: Master Recall Feed
 CREATE TABLE active_recalls (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     agency_source TEXT NOT NULL,
     agency_id TEXT UNIQUE NOT NULL,
     title TEXT NOT NULL,
@@ -31,7 +30,7 @@ CREATE TABLE active_recalls (
 
 -- Table: User Alerts (Matched Recalls)
 CREATE TABLE user_alerts (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID REFERENCES auth.users NOT NULL,
     inventory_item_id UUID REFERENCES user_inventory(id) ON DELETE CASCADE NOT NULL,
     recall_id UUID REFERENCES active_recalls(id) ON DELETE CASCADE NOT NULL,
