@@ -109,53 +109,120 @@ async function fetchFDARecalls(): Promise<
 }
 
 /**
- * Fetch recalls from NHTSA API.
- * Docs: https://www.nhtsa.gov/nhtsa-api
+ * Popular family vehicles to query for NHTSA recalls.
+ * NHTSA's bulk "recallsByYear" endpoint is no longer publicly accessible,
+ * so we query by specific make/model/year using their recallsByVehicle API.
+ * CPSC already covers child equipment (car seats, strollers, etc.).
  */
-async function fetchNHTSARecalls(): Promise<
-  Array<{
-    agency_source: string;
-    agency_id: string;
-    title: string;
-    description: string;
-    affected_models: string[];
-    recall_date: string;
-    remedy_url: string;
-  }>
-> {
+const NHTSA_FAMILY_VEHICLES: Array<{ make: string; model: string }> = [
+  { make: "toyota", model: "rav4" },
+  { make: "toyota", model: "camry" },
+  { make: "toyota", model: "highlander" },
+  { make: "honda", model: "cr-v" },
+  { make: "honda", model: "civic" },
+  { make: "honda", model: "pilot" },
+  { make: "ford", model: "explorer" },
+  { make: "ford", model: "escape" },
+  { make: "chevrolet", model: "equinox" },
+  { make: "chevrolet", model: "traverse" },
+  { make: "hyundai", model: "tucson" },
+  { make: "hyundai", model: "santa fe" },
+  { make: "kia", model: "sportage" },
+  { make: "kia", model: "telluride" },
+  { make: "subaru", model: "outback" },
+];
+
+interface NHTSARecallResult {
+  NHTSACampaignNumber: string;
+  Summary: string;
+  Consequence: string;
+  ModelYear: string;
+  Make: string;
+  Model: string;
+  ReportReceivedDate: string; // DD/MM/YYYY
+}
+
+type NormalizedRecall = {
+  agency_source: string;
+  agency_id: string;
+  title: string;
+  description: string;
+  affected_models: string[];
+  recall_date: string;
+  remedy_url: string;
+};
+
+/**
+ * Fetch recalls from NHTSA API.
+ * Docs: https://www.nhtsa.gov/nhtsa-datasets-and-apis
+ *
+ * Queries recallsByVehicle for a curated set of popular family vehicles
+ * across recent model years. Deduplicates by campaign number.
+ */
+async function fetchNHTSARecalls(): Promise<NormalizedRecall[]> {
   try {
     const currentYear = new Date().getFullYear();
-    const response = await fetch(
-      `https://api.nhtsa.gov/recalls/recallsByYear?year=${currentYear}&type=equipment`,
-      { next: { revalidate: 86400 } }
+    const years = [currentYear, currentYear - 1, currentYear - 2];
+
+    // Build all make/model/year combinations
+    const queries = NHTSA_FAMILY_VEHICLES.flatMap((vehicle) =>
+      years.map((year) => ({ ...vehicle, year }))
     );
 
-    if (!response.ok) return [];
-    const data = await response.json();
+    // Fetch in batches of 10 to avoid hammering the API
+    const batchSize = 10;
+    const allResults: NHTSARecallResult[] = [];
 
-    return (data.results || []).slice(0, 50).map(
-      (recall: {
-        NHTSACampaignNumber: string;
-        Subject: string;
-        Summary: string;
-        ModelYear: string;
-        Make: string;
-        Model: string;
-        ReportReceivedDate: string;
-      }) => ({
+    for (let i = 0; i < queries.length; i += batchSize) {
+      const batch = queries.slice(i, i + batchSize);
+      const responses = await Promise.all(
+        batch.map(async ({ make, model, year }) => {
+          try {
+            const url = `https://api.nhtsa.gov/recalls/recallsByVehicle?make=${encodeURIComponent(make)}&model=${encodeURIComponent(model)}&modelYear=${year}`;
+            const res = await fetch(url, { next: { revalidate: 86400 } });
+            if (!res.ok) return [];
+            const data = await res.json();
+            return (data.results || []) as NHTSARecallResult[];
+          } catch {
+            return [];
+          }
+        })
+      );
+      allResults.push(...responses.flat());
+    }
+
+    // Deduplicate by campaign number
+    const seen = new Set<string>();
+    const unique: NHTSARecallResult[] = [];
+    for (const r of allResults) {
+      if (r.NHTSACampaignNumber && !seen.has(r.NHTSACampaignNumber)) {
+        seen.add(r.NHTSACampaignNumber);
+        unique.push(r);
+      }
+    }
+
+    return unique.map((recall) => {
+      // ReportReceivedDate is DD/MM/YYYY — convert to YYYY-MM-DD
+      let recallDate = new Date().toISOString().split("T")[0];
+      if (recall.ReportReceivedDate) {
+        const [day, month, year] = recall.ReportReceivedDate.split("/");
+        if (day && month && year) {
+          recallDate = `${year}-${month}-${day}`;
+        }
+      }
+
+      return {
         agency_source: "NHTSA",
-        agency_id: recall.NHTSACampaignNumber || `NHTSA-${Date.now()}`,
-        title: recall.Subject || "Unknown",
-        description: recall.Summary || "",
+        agency_id: recall.NHTSACampaignNumber,
+        title: recall.Summary?.slice(0, 200) || "Unknown",
+        description: `${recall.Summary || ""} ${recall.Consequence || ""}`.trim(),
         affected_models: [
           `${recall.ModelYear || ""} ${recall.Make || ""} ${recall.Model || ""}`.trim(),
         ].filter((m) => m.length > 0),
-        recall_date:
-          recall.ReportReceivedDate?.split("T")[0] ||
-          new Date().toISOString().split("T")[0],
+        recall_date: recallDate,
         remedy_url: "",
-      })
-    );
+      };
+    });
   } catch (error) {
     console.error("NHTSA fetch error:", error);
     return [];
@@ -234,7 +301,7 @@ export async function GET() {
     endpoints: {
       cpsc: "https://www.saferproducts.gov/RestWebServices/Recall",
       fda: "https://api.fda.gov/food/enforcement.json",
-      nhtsa: "https://api.nhtsa.gov/recalls/recallsByYear",
+      nhtsa: "https://api.nhtsa.gov/recalls/recallsByVehicle",
     },
   });
 }
