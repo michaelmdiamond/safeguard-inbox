@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { matchItemAgainstRecalls, getSeverity } from "@/lib/matching";
+import { sendRecallAlertEmail } from "@/lib/notifications";
+import type { ActiveRecall, InventoryItem } from "@/types/database";
 
 function getServiceClient() {
   return createClient(
@@ -256,35 +259,176 @@ async function fetchNHTSARecalls(): Promise<NormalizedRecall[]> {
 }
 
 /**
+ * Fetch recalls from the USDA FSIS API.
+ * Covers meat, poultry, and processed egg products.
+ * Docs: https://www.fsis.usda.gov/science-data/data-sets-visualizations
+ */
+async function fetchUSDARecalls(): Promise<NormalizedRecall[]> {
+  try {
+    const response = await fetch(
+      "https://api.fsis.usda.gov/fsis-open-data/recalls",
+      { next: { revalidate: 86400 } }
+    );
+
+    if (!response.ok) return [];
+    const data = await response.json();
+    const records = Array.isArray(data) ? data : data.results || [];
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return records.slice(0, 1000).map((r: any) => {
+      const recallDate = r.recall_date || r.Date || new Date().toISOString().split("T")[0];
+      const products = r.products || [];
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const affected = products.map((p: any) => p.product_name || p.name).filter(Boolean);
+
+      return {
+        agency_source: "USDA",
+        agency_id: r.recall_number || r.Recall_Number || `USDA-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        title: (r.title || r.reason_for_recall || r.Description || "USDA Recall").slice(0, 200),
+        description: r.reason_for_recall || r.Description || "",
+        affected_models: affected.slice(0, 10),
+        recall_date: typeof recallDate === "string" ? recallDate.slice(0, 10) : new Date().toISOString().split("T")[0],
+        remedy_url: r.url || "",
+      };
+    });
+  } catch (error) {
+    console.error("USDA fetch error:", error);
+    return [];
+  }
+}
+
+/**
+ * After syncing new recalls, re-match all user inventory items against them.
+ * Creates alerts and sends notifications for high-severity matches.
+ */
+async function reMatchInventory(
+  supabase: ReturnType<typeof getServiceClient>,
+  newRecalls: ActiveRecall[]
+): Promise<number> {
+  if (newRecalls.length === 0) return 0;
+
+  const { data: allItems } = await supabase
+    .from("user_inventory")
+    .select("*");
+
+  if (!allItems || allItems.length === 0) return 0;
+
+  let alertsCreated = 0;
+
+  // Group items by user for efficient notification
+  const userItems = new Map<string, typeof allItems>();
+  for (const item of allItems) {
+    const existing = userItems.get(item.user_id) || [];
+    existing.push(item);
+    userItems.set(item.user_id, existing);
+  }
+
+  for (const [userId, items] of userItems) {
+    const newAlerts: Array<{
+      user_id: string;
+      inventory_item_id: string;
+      recall_id: string;
+      match_score: number;
+      severity: string;
+      status: string;
+    }> = [];
+
+    for (const item of items) {
+      const matches = matchItemAgainstRecalls(
+        item as InventoryItem,
+        newRecalls
+      );
+
+      for (const match of matches) {
+        newAlerts.push({
+          user_id: userId,
+          inventory_item_id: item.id,
+          recall_id: match.recall.id,
+          match_score: match.score,
+          severity: getSeverity(match.score),
+          status: "new",
+        });
+      }
+    }
+
+    if (newAlerts.length === 0) continue;
+
+    const { data: savedAlerts } = await supabase
+      .from("user_alerts")
+      .upsert(newAlerts, { onConflict: "inventory_item_id,recall_id" })
+      .select("*, inventory_item:user_inventory(*), recall:active_recalls(*)");
+
+    alertsCreated += newAlerts.length;
+
+    // Send notifications for high-severity alerts
+    const highAlerts = (savedAlerts || []).filter(
+      (a) => a.severity === "high" && !a.notified_at
+    );
+
+    if (highAlerts.length > 0) {
+      const { data: userData } = await supabase.auth.admin.getUserById(userId);
+      const userEmail = userData?.user?.email;
+
+      if (userEmail) {
+        for (const alert of highAlerts) {
+          await sendRecallAlertEmail(userEmail, alert);
+          await supabase
+            .from("user_alerts")
+            .update({ notified_at: new Date().toISOString() })
+            .eq("id", alert.id);
+        }
+      }
+    }
+  }
+
+  return alertsCreated;
+}
+
+/**
  * Shared sync logic used by both GET (Vercel cron) and POST handlers.
  */
 async function runSync(request: NextRequest) {
-  // Verify cron secret (optional security measure)
-  const authHeader = request.headers.get("authorization");
+  // --- Mandatory auth check ---
   const cronSecret = process.env.CRON_SECRET;
-  if (cronSecret && authHeader !== `Bearer ${cronSecret}`) {
+  if (!cronSecret) {
+    console.error("CRON_SECRET is not configured");
+    return NextResponse.json(
+      { error: "Server misconfigured" },
+      { status: 500 }
+    );
+  }
+
+  const authHeader = request.headers.get("authorization");
+  if (authHeader !== `Bearer ${cronSecret}`) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
   const supabase = getServiceClient();
 
   // Fetch from all agencies in parallel
-  const [cpscRecalls, fdaRecalls, nhtsaRecalls] = await Promise.all([
-    fetchCPSCRecalls(),
-    fetchFDARecalls(),
-    fetchNHTSARecalls(),
-  ]);
+  const [cpscRecalls, fdaRecalls, nhtsaRecalls, usdaRecalls] =
+    await Promise.all([
+      fetchCPSCRecalls(),
+      fetchFDARecalls(),
+      fetchNHTSARecalls(),
+      fetchUSDARecalls(),
+    ]);
 
-  const allRecalls = [...cpscRecalls, ...fdaRecalls, ...nhtsaRecalls];
+  const allRecalls = [
+    ...cpscRecalls,
+    ...fdaRecalls,
+    ...nhtsaRecalls,
+    ...usdaRecalls,
+  ];
 
   if (allRecalls.length === 0) {
     return NextResponse.json({
       message: "No new recalls fetched",
-      counts: { cpsc: 0, fda: 0, nhtsa: 0 },
+      counts: { cpsc: 0, fda: 0, nhtsa: 0, usda: 0 },
     });
   }
 
-  // Upsert in batches of 500 to stay within request size limits
+  // Upsert in batches of 500
   const batchSize = 500;
   let upsertErrors = 0;
   for (let i = 0; i < allRecalls.length; i += batchSize) {
@@ -306,14 +450,26 @@ async function runSync(request: NextRequest) {
     );
   }
 
+  // Re-match all inventory against newly synced recalls
+  const { data: freshRecalls } = await supabase
+    .from("active_recalls")
+    .select("*");
+
+  const alertsCreated = await reMatchInventory(
+    supabase,
+    (freshRecalls || []) as ActiveRecall[]
+  );
+
   return NextResponse.json({
     message: "Recall sync completed",
     counts: {
       cpsc: cpscRecalls.length,
       fda: fdaRecalls.length,
       nhtsa: nhtsaRecalls.length,
+      usda: usdaRecalls.length,
       total: allRecalls.length,
     },
+    alerts_created: alertsCreated,
   });
 }
 

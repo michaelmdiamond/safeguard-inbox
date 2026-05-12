@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { matchItemAgainstRecalls, getSeverity } from "@/lib/matching";
+import { sendRecallAlertEmail } from "@/lib/notifications";
 import type { InventoryItem, ActiveRecall } from "@/types/database";
 
 function getServiceClient() {
@@ -11,15 +12,37 @@ function getServiceClient() {
 }
 
 /**
+ * Verify the caller is authorized. Accepts either:
+ * - A valid CRON_SECRET in the Authorization header (internal/server calls)
+ * - A valid Supabase user session cookie (authenticated user triggering re-match)
+ */
+async function verifyAuth(request: NextRequest): Promise<boolean> {
+  // Check shared secret first (server-to-server)
+  const cronSecret = process.env.CRON_SECRET;
+  const auth = request.headers.get("authorization");
+  if (cronSecret && auth === `Bearer ${cronSecret}`) return true;
+
+  // Fall back to Supabase session check
+  const { createClient: createServerClient } = await import("@/lib/supabase/server");
+  const supabase = await createServerClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  return !!user;
+}
+
+/**
  * POST /api/match
  *
  * Runs fuzzy matching between an inventory item and all active recalls.
- * Used to trigger matching for a specific item or re-check after new recalls.
+ * Requires authentication (CRON_SECRET or user session).
  *
  * Body: { inventory_item_id: string }
  */
 export async function POST(request: NextRequest) {
   try {
+    if (!(await verifyAuth(request))) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     const body = await request.json();
     const { inventory_item_id } = body;
 
@@ -32,7 +55,6 @@ export async function POST(request: NextRequest) {
 
     const supabase = getServiceClient();
 
-    // Fetch the inventory item
     const { data: item, error: itemError } = await supabase
       .from("user_inventory")
       .select("*")
@@ -46,7 +68,6 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Fetch all active recalls
     const { data: recalls, error: recallsError } = await supabase
       .from("active_recalls")
       .select("*");
@@ -58,13 +79,11 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Run matching
     const matches = matchItemAgainstRecalls(
       item as InventoryItem,
       recalls as ActiveRecall[]
     );
 
-    // Save alerts for matches
     if (matches.length > 0) {
       const alerts = matches.map((match) => ({
         user_id: item.user_id,
@@ -75,14 +94,33 @@ export async function POST(request: NextRequest) {
         status: "new",
       }));
 
-      const { error: alertError } = await supabase
+      const { data: savedAlerts, error: alertError } = await supabase
         .from("user_alerts")
-        .upsert(alerts, {
-          onConflict: "inventory_item_id,recall_id",
-        });
+        .upsert(alerts, { onConflict: "inventory_item_id,recall_id" })
+        .select("*, inventory_item:user_inventory(*), recall:active_recalls(*)");
 
       if (alertError) {
         console.error("Failed to save alerts:", alertError);
+      }
+
+      // Send email for high-severity alerts
+      if (savedAlerts) {
+        const { data: userData } = await supabase.auth.admin.getUserById(
+          item.user_id
+        );
+        const userEmail = userData?.user?.email;
+
+        if (userEmail) {
+          for (const alert of savedAlerts) {
+            if (alert.severity === "high" && !alert.notified_at) {
+              await sendRecallAlertEmail(userEmail, alert);
+              await supabase
+                .from("user_alerts")
+                .update({ notified_at: new Date().toISOString() })
+                .eq("id", alert.id);
+            }
+          }
+        }
       }
     }
 

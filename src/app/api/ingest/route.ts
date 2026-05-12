@@ -2,9 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { parseReceipt } from "@/lib/gemini";
 import { matchItemAgainstRecalls, getSeverity } from "@/lib/matching";
-import type { ActiveRecall } from "@/types/database";
+import { sendRecallAlertEmail } from "@/lib/notifications";
+import type { ActiveRecall, InventoryItem } from "@/types/database";
 
-// Use service role key for webhook processing (no user session)
 function getServiceClient() {
   return createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -13,17 +13,32 @@ function getServiceClient() {
 }
 
 /**
+ * Verify the SendGrid webhook shared secret.
+ * Rejects requests that don't include a valid Authorization header.
+ */
+function verifyWebhookAuth(request: NextRequest): boolean {
+  const secret = process.env.SENDGRID_WEBHOOK_SECRET;
+  if (!secret) return false; // Deny if secret is not configured
+  const auth = request.headers.get("authorization");
+  return auth === `Bearer ${secret}`;
+}
+
+/**
  * POST /api/ingest
  *
  * SendGrid Inbound Parse webhook handler.
  * Receives forwarded emails, parses receipts with Gemini,
- * saves products to user_inventory, and triggers matching.
+ * saves products to user_inventory, and triggers matching + notifications.
  */
 export async function POST(request: NextRequest) {
   try {
+    // --- Webhook authentication ---
+    if (!verifyWebhookAuth(request)) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     const formData = await request.formData();
 
-    // SendGrid sends the email data as form fields
     const to = formData.get("to") as string;
     const html = formData.get("html") as string;
     const text = formData.get("text") as string;
@@ -35,9 +50,11 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Extract user identifier from email alias (e.g., user.abc123@safeguard.io)
+    // Extract alias from email address (e.g., "inbox.a1b2c3@safeguard.io")
     const emailDomain = process.env.NEXT_PUBLIC_EMAIL_DOMAIN || "safeguard.io";
-    const aliasMatch = to.match(new RegExp(`([^<\\s]+)@${emailDomain.replace(".", "\\.")}`));
+    const aliasMatch = to.match(
+      new RegExp(`([^<\\s]+)@${emailDomain.replace(/\./g, "\\.")}`)
+    );
     if (!aliasMatch) {
       return NextResponse.json(
         { error: "Invalid recipient address" },
@@ -45,14 +62,24 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const userAlias = aliasMatch[1];
-    // In production, look up user_id from the alias
-    // For now, extract UUID-like pattern from the alias
+    const alias = aliasMatch[1];
     const supabase = getServiceClient();
 
-    // Look up user by alias pattern (the alias contains the user id slug)
-    // In production: SELECT user_id FROM user_aliases WHERE alias = $1
-    // For demo, we'll use the alias as a lookup key
+    // --- Resolve user_id from alias ---
+    const { data: aliasRow, error: aliasError } = await supabase
+      .from("user_aliases")
+      .select("user_id")
+      .eq("alias", alias)
+      .single();
+
+    if (aliasError || !aliasRow) {
+      return NextResponse.json(
+        { error: "Unknown recipient alias" },
+        { status: 404 }
+      );
+    }
+
+    const userId: string = aliasRow.user_id;
 
     const emailContent = html || text;
     if (!emailContent) {
@@ -72,13 +99,10 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // Generate a source reference (PII-scrubbed)
     const sourceEmailId = `sg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
-    // Save products to inventory
-    // Note: In production, user_id would be resolved from the alias
     const inventoryItems = products.map((product) => ({
-      user_id: userAlias, // In production: resolved UUID
+      user_id: userId,
       brand: product.brand,
       product_name: product.product_name,
       model_number: product.model_number,
@@ -104,16 +128,22 @@ export async function POST(request: NextRequest) {
       .from("active_recalls")
       .select("*");
 
+    let alertsCreated = 0;
+
     if (recalls && savedItems) {
+      // Fetch user email for notifications
+      const { data: userData } = await supabase.auth.admin.getUserById(userId);
+      const userEmail = userData?.user?.email;
+
       for (const item of savedItems) {
         const matches = matchItemAgainstRecalls(
-          item,
+          item as InventoryItem,
           recalls as ActiveRecall[]
         );
 
         if (matches.length > 0) {
           const alerts = matches.map((match) => ({
-            user_id: item.user_id,
+            user_id: userId,
             inventory_item_id: item.id,
             recall_id: match.recall.id,
             match_score: match.score,
@@ -121,9 +151,25 @@ export async function POST(request: NextRequest) {
             status: "new",
           }));
 
-          await supabase.from("user_alerts").upsert(alerts, {
-            onConflict: "inventory_item_id,recall_id",
-          });
+          const { data: savedAlerts } = await supabase
+            .from("user_alerts")
+            .upsert(alerts, { onConflict: "inventory_item_id,recall_id" })
+            .select("*, inventory_item:user_inventory(*), recall:active_recalls(*)");
+
+          alertsCreated += alerts.length;
+
+          // Send email for high-severity alerts
+          if (userEmail && savedAlerts) {
+            for (const alert of savedAlerts) {
+              if (alert.severity === "high") {
+                await sendRecallAlertEmail(userEmail, alert);
+                await supabase
+                  .from("user_alerts")
+                  .update({ notified_at: new Date().toISOString() })
+                  .eq("id", alert.id);
+              }
+            }
+          }
         }
       }
     }
@@ -132,6 +178,7 @@ export async function POST(request: NextRequest) {
       message: "Receipt processed successfully",
       products_found: products.length,
       products_saved: savedItems?.length || 0,
+      alerts_created: alertsCreated,
     });
   } catch (error) {
     console.error("Ingest error:", error);

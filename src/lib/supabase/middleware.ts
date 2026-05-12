@@ -34,15 +34,18 @@ export async function updateSession(request: NextRequest) {
   } = await supabase.auth.getUser();
 
   // Redirect unauthenticated users to login for protected routes
-  const protectedPaths = ["/dashboard", "/profile", "/recalls"];
+  const protectedPaths = ["/dashboard", "/profile", "/recalls", "/reset-password"];
   const isProtected = protectedPaths.some((path) =>
     request.nextUrl.pathname.startsWith(path)
   );
 
   if (!user && isProtected) {
-    const url = request.nextUrl.clone();
-    url.pathname = "/login";
-    return NextResponse.redirect(url);
+    // Allow reset-password through — user has a recovery session
+    if (!request.nextUrl.pathname.startsWith("/reset-password")) {
+      const url = request.nextUrl.clone();
+      url.pathname = "/login";
+      return NextResponse.redirect(url);
+    }
   }
 
   // Redirect authenticated users away from auth pages
