@@ -297,6 +297,82 @@ async function fetchUSDARecalls(): Promise<NormalizedRecall[]> {
   }
 }
 
+/** Decode common XML/HTML entities. */
+function decodeEntities(str: string): string {
+  return str
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'");
+}
+
+/** Extract the text content of an XML element, handling CDATA sections. */
+function extractXmlField(item: string, tag: string): string {
+  const cdataMatch = item.match(
+    new RegExp(`<${tag}[^>]*><!\\[CDATA\\[([\\s\\S]*?)\\]\\]><\\/${tag}>`)
+  );
+  if (cdataMatch) return cdataMatch[1].trim();
+  const plainMatch = item.match(
+    new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`)
+  );
+  return plainMatch ? decodeEntities(plainMatch[1].trim()) : "";
+}
+
+/**
+ * Fetch food safety alerts from the CDC RSS feed.
+ * Covers Salmonella, Listeria, allergen alerts, and adulterated food products.
+ * Aggregates data from FDA, USDA, and CDC's own outbreak investigations.
+ * Feed: https://tools.cdc.gov/api/v2/resources/media/316422.rss
+ */
+async function fetchCDCAlerts(): Promise<NormalizedRecall[]> {
+  try {
+    const response = await fetch(
+      "https://tools.cdc.gov/api/v2/resources/media/316422.rss",
+      { next: { revalidate: 86400 } }
+    );
+    if (!response.ok) return [];
+
+    const xml = await response.text();
+    const items = xml.match(/<item>([\s\S]*?)<\/item>/g) ?? [];
+
+    return items.slice(0, 500).map((item) => {
+      const title = extractXmlField(item, "title");
+      const description = extractXmlField(item, "description");
+      const link = extractXmlField(item, "link");
+      const guid = extractXmlField(item, "guid");
+      const pubDate = extractXmlField(item, "pubDate");
+
+      // Use the `c=` query param from the guid URL as the stable ID
+      const cdcId =
+        guid.match(/[?&]c=(\d+)/)?.[1] ?? guid.slice(-12).replace(/\W/g, "");
+      const agencyId = `CDC-${cdcId}`;
+
+      // Parse RFC 2822 date → YYYY-MM-DD
+      let recallDate = new Date().toISOString().split("T")[0];
+      if (pubDate) {
+        const parsed = new Date(pubDate);
+        if (!isNaN(parsed.getTime())) {
+          recallDate = parsed.toISOString().split("T")[0];
+        }
+      }
+
+      return {
+        agency_source: "CDC",
+        agency_id: agencyId,
+        title: title.slice(0, 200) || "CDC Food Safety Alert",
+        description,
+        affected_models: [],
+        recall_date: recallDate,
+        remedy_url: link,
+      };
+    });
+  } catch (error) {
+    console.error("CDC fetch error:", error);
+    return [];
+  }
+}
+
 /**
  * After syncing new recalls, re-match all user inventory items against them.
  * Creates alerts and sends notifications for high-severity matches.
@@ -406,12 +482,13 @@ async function runSync(request: NextRequest) {
   const supabase = getServiceClient();
 
   // Fetch from all agencies in parallel
-  const [cpscRecalls, fdaRecalls, nhtsaRecalls, usdaRecalls] =
+  const [cpscRecalls, fdaRecalls, nhtsaRecalls, usdaRecalls, cdcAlerts] =
     await Promise.all([
       fetchCPSCRecalls(),
       fetchFDARecalls(),
       fetchNHTSARecalls(),
       fetchUSDARecalls(),
+      fetchCDCAlerts(),
     ]);
 
   const allRecalls = [
@@ -419,12 +496,13 @@ async function runSync(request: NextRequest) {
     ...fdaRecalls,
     ...nhtsaRecalls,
     ...usdaRecalls,
+    ...cdcAlerts,
   ];
 
   if (allRecalls.length === 0) {
     return NextResponse.json({
       message: "No new recalls fetched",
-      counts: { cpsc: 0, fda: 0, nhtsa: 0, usda: 0 },
+      counts: { cpsc: 0, fda: 0, nhtsa: 0, usda: 0, cdc: 0 },
     });
   }
 
@@ -467,6 +545,7 @@ async function runSync(request: NextRequest) {
       fda: fdaRecalls.length,
       nhtsa: nhtsaRecalls.length,
       usda: usdaRecalls.length,
+      cdc: cdcAlerts.length,
       total: allRecalls.length,
     },
     alerts_created: alertsCreated,

@@ -1,6 +1,6 @@
 export type ProductCategory = "Baby" | "Food" | "Electronics" | "Toys" | "Home" | "Auto" | "Other";
 
-export type RecallAgency = "CPSC" | "FDA" | "USDA" | "NHTSA";
+export type RecallAgency = "CPSC" | "FDA" | "USDA" | "NHTSA" | "CDC";
 
 export type AlertSeverity = "high" | "medium" | "low";
 export type AlertStatus = "new" | "confirmed" | "dismissed";

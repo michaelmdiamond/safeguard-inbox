@@ -56,6 +56,12 @@ const agencies = [
     desc: "Car seats, vehicles, auto parts",
     variant: "nhtsa" as const,
   },
+  {
+    name: "CDC",
+    full: "Centers for Disease Control",
+    desc: "Food outbreaks, Salmonella, allergens",
+    variant: "secondary" as const,
+  },
 ];
 
 export default async function ProfilePage() {
