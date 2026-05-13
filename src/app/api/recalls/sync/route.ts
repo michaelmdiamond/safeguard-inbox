@@ -297,6 +297,56 @@ async function fetchUSDARecalls(): Promise<NormalizedRecall[]> {
   }
 }
 
+interface HealthCanadaItem {
+  recallId: string;
+  title: string;
+  date_published: number; // Unix timestamp
+  category: string[];
+  url: string;
+}
+
+/**
+ * Fetch recalls from Health Canada's public recall API.
+ * Returns the 15 most recent across all categories (Food, Vehicle, Health, CPS).
+ * Syncing daily accumulates a full history via upsert deduplication.
+ * API: https://healthycanadians.gc.ca/recall-alert-rappel-avis/api/recent/en
+ */
+async function fetchHealthCanadaRecalls(): Promise<NormalizedRecall[]> {
+  try {
+    const response = await fetch(
+      "https://healthycanadians.gc.ca/recall-alert-rappel-avis/api/recent/en",
+      { next: { revalidate: 86400 } }
+    );
+    if (!response.ok) return [];
+
+    const data = await response.json();
+    const items: HealthCanadaItem[] = data?.results?.ALL ?? [];
+
+    return items.map((item) => {
+      // Titles follow "Brand X Product Y recalled due to Z" — extract product part
+      const productPart =
+        item.title.split(/\s+recalled\s+/i)[0]?.trim() ?? item.title;
+
+      const recallDate = item.date_published
+        ? new Date(item.date_published * 1000).toISOString().split("T")[0]
+        : new Date().toISOString().split("T")[0];
+
+      return {
+        agency_source: "HC",
+        agency_id: `HC-${item.recallId}`,
+        title: item.title.slice(0, 200),
+        description: item.title,
+        affected_models: productPart ? [productPart] : [],
+        recall_date: recallDate,
+        remedy_url: `https://healthycanadians.gc.ca/recall-alert-rappel-avis/api/${item.recallId}/en`,
+      };
+    });
+  } catch (error) {
+    console.error("Health Canada fetch error:", error);
+    return [];
+  }
+}
+
 /** Decode common XML/HTML entities. */
 function decodeEntities(str: string): string {
   return str
@@ -482,13 +532,14 @@ async function runSync(request: NextRequest) {
   const supabase = getServiceClient();
 
   // Fetch from all agencies in parallel
-  const [cpscRecalls, fdaRecalls, nhtsaRecalls, usdaRecalls, cdcAlerts] =
+  const [cpscRecalls, fdaRecalls, nhtsaRecalls, usdaRecalls, cdcAlerts, hcRecalls] =
     await Promise.all([
       fetchCPSCRecalls(),
       fetchFDARecalls(),
       fetchNHTSARecalls(),
       fetchUSDARecalls(),
       fetchCDCAlerts(),
+      fetchHealthCanadaRecalls(),
     ]);
 
   const allRecalls = [
@@ -497,12 +548,13 @@ async function runSync(request: NextRequest) {
     ...nhtsaRecalls,
     ...usdaRecalls,
     ...cdcAlerts,
+    ...hcRecalls,
   ];
 
   if (allRecalls.length === 0) {
     return NextResponse.json({
       message: "No new recalls fetched",
-      counts: { cpsc: 0, fda: 0, nhtsa: 0, usda: 0, cdc: 0 },
+      counts: { cpsc: 0, fda: 0, nhtsa: 0, usda: 0, cdc: 0, hc: 0 },
     });
   }
 
@@ -546,6 +598,7 @@ async function runSync(request: NextRequest) {
       nhtsa: nhtsaRecalls.length,
       usda: usdaRecalls.length,
       cdc: cdcAlerts.length,
+      hc: hcRecalls.length,
       total: allRecalls.length,
     },
     alerts_created: alertsCreated,

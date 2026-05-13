@@ -62,6 +62,12 @@ const agencies = [
     desc: "Food outbreaks, Salmonella, allergens",
     variant: "secondary" as const,
   },
+  {
+    name: "HC",
+    full: "Health Canada",
+    desc: "Canadian recalls, cross-border products",
+    variant: "secondary" as const,
+  },
 ];
 
 export default async function ProfilePage() {
