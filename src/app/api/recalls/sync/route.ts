@@ -30,7 +30,7 @@ interface CPSCRecall {
 async function fetchCPSCRecalls(): Promise<NormalizedRecall[]> {
   try {
     const response = await fetch(
-      "https://www.saferproducts.gov/RestWebServices/Recall?format=json&RecallDateStart=2015-01-01",
+      "https://www.saferproducts.gov/RestWebServices/Recall?format=json",
       { next: { revalidate: 86400 } } // Cache for 24 hours
     );
 
@@ -95,40 +95,56 @@ function normalizeFDARecord(
   };
 }
 
+const FDA_PAGE_SIZE = 1000;
+const FDA_MAX_SKIP = 25000; // openFDA hard limit
+const FDA_BATCH_SIZE = 5;   // concurrent requests per batch
+
 /**
- * Fetch a single openFDA enforcement endpoint.
- * Returns up to 1000 most recent records.
+ * Fetch all pages from an openFDA enforcement endpoint.
+ * Paginates in batches of FDA_BATCH_SIZE concurrent requests,
+ * stopping when a page returns no results or we hit FDA_MAX_SKIP.
  */
-async function fetchFDAEndpoint(url: string): Promise<FDAEnforcementRecord[]> {
-  try {
-    const response = await fetch(url, { next: { revalidate: 86400 } });
-    if (!response.ok) return [];
-    const data = await response.json();
-    return (data.results || []) as FDAEnforcementRecord[];
-  } catch (error) {
-    console.error(`FDA fetch error for ${url}:`, error);
-    return [];
+async function fetchFDAAllPages(base: string): Promise<FDAEnforcementRecord[]> {
+  const all: FDAEnforcementRecord[] = [];
+  let skip = 0;
+
+  while (skip <= FDA_MAX_SKIP) {
+    const batch: Promise<FDAEnforcementRecord[]>[] = [];
+    for (let i = 0; i < FDA_BATCH_SIZE && skip <= FDA_MAX_SKIP; i++, skip += FDA_PAGE_SIZE) {
+      const url = `${base}&limit=${FDA_PAGE_SIZE}&skip=${skip}`;
+      batch.push(
+        fetch(url)
+          .then((r) => r.ok ? r.json() : { results: [] })
+          .then((d) => (d.results || []) as FDAEnforcementRecord[])
+          .catch(() => [] as FDAEnforcementRecord[])
+      );
+    }
+    const pages = await Promise.all(batch);
+    const records = pages.flat();
+    all.push(...records);
+    // Stop early if any page in the batch was empty
+    if (pages.some((p) => p.length === 0)) break;
+    // Rate-limit: 40 req/min without API key → ~1.5s between batches of 5
+    await new Promise((r) => setTimeout(r, 1500));
   }
+
+  return all;
 }
 
 /**
- * Fetch recalls from all three FDA enforcement endpoints:
- * - Food (baby formula, snacks, beverages)
- * - Drug (children's medication, OTC drugs)
- * - Device (baby monitors, breast pumps, medical devices)
+ * Fetch recalls from all three FDA enforcement endpoints with full pagination:
+ * - Food (baby formula, snacks, beverages) — ~28,000 records
+ * - Drug (children's medication, OTC drugs) — ~17,000 records
+ * - Device (baby monitors, breast pumps, medical devices) — ~38,000 records
  * Docs: https://open.fda.gov/apis/
  */
 async function fetchFDARecalls(): Promise<NormalizedRecall[]> {
+  const BASE = "https://api.fda.gov";
+  const SORT = "sort=recall_initiation_date:desc";
   const [food, drug, device] = await Promise.all([
-    fetchFDAEndpoint(
-      "https://api.fda.gov/food/enforcement.json?limit=1000&sort=recall_initiation_date:desc"
-    ),
-    fetchFDAEndpoint(
-      "https://api.fda.gov/drug/enforcement.json?limit=1000&sort=recall_initiation_date:desc"
-    ),
-    fetchFDAEndpoint(
-      "https://api.fda.gov/device/enforcement.json?limit=1000&sort=recall_initiation_date:desc"
-    ),
+    fetchFDAAllPages(`${BASE}/food/enforcement.json?${SORT}`),
+    fetchFDAAllPages(`${BASE}/drug/enforcement.json?${SORT}`),
+    fetchFDAAllPages(`${BASE}/device/enforcement.json?${SORT}`),
   ]);
 
   const counter = { n: 0 };
@@ -137,29 +153,8 @@ async function fetchFDARecalls(): Promise<NormalizedRecall[]> {
   );
 }
 
-/**
- * Popular family vehicles to query for NHTSA recalls.
- * NHTSA's bulk "recallsByYear" endpoint is no longer publicly accessible,
- * so we query by specific make/model/year using their recallsByVehicle API.
- * CPSC already covers child equipment (car seats, strollers, etc.).
- */
-const NHTSA_FAMILY_VEHICLES: Array<{ make: string; model: string }> = [
-  { make: "toyota", model: "rav4" },
-  { make: "toyota", model: "camry" },
-  { make: "toyota", model: "highlander" },
-  { make: "honda", model: "cr-v" },
-  { make: "honda", model: "civic" },
-  { make: "honda", model: "pilot" },
-  { make: "ford", model: "explorer" },
-  { make: "ford", model: "escape" },
-  { make: "chevrolet", model: "equinox" },
-  { make: "chevrolet", model: "traverse" },
-  { make: "hyundai", model: "tucson" },
-  { make: "hyundai", model: "santa fe" },
-  { make: "kia", model: "sportage" },
-  { make: "kia", model: "telluride" },
-  { make: "subaru", model: "outback" },
-];
+const NHTSA_YEAR_LOOKBACK = 15; // years of recall history to fetch
+const NHTSA_BATCH_SIZE = 15;   // concurrent requests per batch
 
 interface NHTSARecallResult {
   NHTSACampaignNumber: string;
@@ -185,37 +180,72 @@ type NormalizedRecall = {
  * Fetch recalls from NHTSA API.
  * Docs: https://www.nhtsa.gov/nhtsa-datasets-and-apis
  *
- * Queries recallsByVehicle for a curated set of popular family vehicles
- * across recent model years. Deduplicates by campaign number.
+ * Strategy: discover all makes that have recalls via the products API,
+ * then for each make discover all models, then query recallsByVehicle
+ * for each make/model/year combination going back NHTSA_YEAR_LOOKBACK years.
+ * Deduplicates by campaign number.
  */
 async function fetchNHTSARecalls(): Promise<NormalizedRecall[]> {
   try {
     const currentYear = new Date().getFullYear();
-    const years = [currentYear, currentYear - 1, currentYear - 2];
-
-    // Build all make/model/year combinations
-    const queries = NHTSA_FAMILY_VEHICLES.flatMap((vehicle) =>
-      years.map((year) => ({ ...vehicle, year }))
+    const years = Array.from(
+      { length: NHTSA_YEAR_LOOKBACK },
+      (_, i) => currentYear - i
     );
 
-    // Fetch in batches of 10 to avoid hammering the API
-    const batchSize = 10;
-    const allResults: NHTSARecallResult[] = [];
+    // Step 1: Discover all makes that have recall history (sample recent years)
+    const sampleYears = years.slice(0, 5);
+    const makeSets = await Promise.all(
+      sampleYears.map((year) =>
+        fetch(`https://api.nhtsa.gov/products/vehicle/makes?issueType=r&modelYear=${year}`)
+          .then((r) => r.ok ? r.json() : { results: [] })
+          .then((d) => (d.results || []).map((m: { make: string }) => m.make.toUpperCase()))
+          .catch(() => [] as string[])
+      )
+    );
+    const allMakes = [...new Set(makeSets.flat())];
 
-    for (let i = 0; i < queries.length; i += batchSize) {
-      const batch = queries.slice(i, i + batchSize);
+    // Step 2: For each make, discover models that have recalls across all years
+    const makeModelQueries: Array<{ make: string; year: number }> = allMakes.flatMap(
+      (make) => sampleYears.map((year) => ({ make, year }))
+    );
+
+    const makeModelPairs = new Set<string>();
+    for (let i = 0; i < makeModelQueries.length; i += NHTSA_BATCH_SIZE) {
+      const batch = makeModelQueries.slice(i, i + NHTSA_BATCH_SIZE);
+      const results = await Promise.all(
+        batch.map(({ make, year }) =>
+          fetch(`https://api.nhtsa.gov/products/vehicle/models?make=${encodeURIComponent(make)}&issueType=r&modelYear=${year}`)
+            .then((r) => r.ok ? r.json() : { results: [] })
+            .then((d) =>
+              (d.results || []).map((m: { model: string }) =>
+                `${make}|||${m.model.toUpperCase()}`
+              )
+            )
+            .catch(() => [] as string[])
+        )
+      );
+      results.flat().forEach((pair) => makeModelPairs.add(pair));
+    }
+
+    // Step 3: Query recallsByVehicle for each make/model × all years
+    const recallQueries = [...makeModelPairs].flatMap((pair) => {
+      const [make, model] = pair.split("|||");
+      return years.map((year) => ({ make, model, year }));
+    });
+
+    const allResults: NHTSARecallResult[] = [];
+    for (let i = 0; i < recallQueries.length; i += NHTSA_BATCH_SIZE) {
+      const batch = recallQueries.slice(i, i + NHTSA_BATCH_SIZE);
       const responses = await Promise.all(
-        batch.map(async ({ make, model, year }) => {
-          try {
-            const url = `https://api.nhtsa.gov/recalls/recallsByVehicle?make=${encodeURIComponent(make)}&model=${encodeURIComponent(model)}&modelYear=${year}`;
-            const res = await fetch(url, { next: { revalidate: 86400 } });
-            if (!res.ok) return [];
-            const data = await res.json();
-            return (data.results || []) as NHTSARecallResult[];
-          } catch {
-            return [];
-          }
-        })
+        batch.map(({ make, model, year }) =>
+          fetch(
+            `https://api.nhtsa.gov/recalls/recallsByVehicle?make=${encodeURIComponent(make)}&model=${encodeURIComponent(model)}&modelYear=${year}`
+          )
+            .then((r) => r.ok ? r.json() : { results: [] })
+            .then((d) => (d.results || []) as NHTSARecallResult[])
+            .catch(() => [] as NHTSARecallResult[])
+        )
       );
       allResults.push(...responses.flat());
     }
@@ -231,15 +261,11 @@ async function fetchNHTSARecalls(): Promise<NormalizedRecall[]> {
     }
 
     return unique.map((recall) => {
-      // ReportReceivedDate is DD/MM/YYYY — convert to YYYY-MM-DD
       let recallDate = new Date().toISOString().split("T")[0];
       if (recall.ReportReceivedDate) {
         const [day, month, year] = recall.ReportReceivedDate.split("/");
-        if (day && month && year) {
-          recallDate = `${year}-${month}-${day}`;
-        }
+        if (day && month && year) recallDate = `${year}-${month}-${day}`;
       }
-
       return {
         agency_source: "NHTSA",
         agency_id: recall.NHTSACampaignNumber,
@@ -259,42 +285,13 @@ async function fetchNHTSARecalls(): Promise<NormalizedRecall[]> {
 }
 
 /**
- * Fetch recalls from the USDA FSIS API.
- * Covers meat, poultry, and processed egg products.
- * Docs: https://www.fsis.usda.gov/science-data/data-sets-visualizations
+ * USDA FSIS blocks all automated access via Akamai WAF.
+ * USDA meat/poultry recalls are captured through the CDC food safety
+ * RSS feed (fetchCDCAlerts), which aggregates both FDA and USDA FSIS alerts.
+ * This function is intentionally a no-op.
  */
 async function fetchUSDARecalls(): Promise<NormalizedRecall[]> {
-  try {
-    const response = await fetch(
-      "https://api.fsis.usda.gov/fsis-open-data/recalls",
-      { next: { revalidate: 86400 } }
-    );
-
-    if (!response.ok) return [];
-    const data = await response.json();
-    const records = Array.isArray(data) ? data : data.results || [];
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return records.slice(0, 1000).map((r: any) => {
-      const recallDate = r.recall_date || r.Date || new Date().toISOString().split("T")[0];
-      const products = r.products || [];
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const affected = products.map((p: any) => p.product_name || p.name).filter(Boolean);
-
-      return {
-        agency_source: "USDA",
-        agency_id: r.recall_number || r.Recall_Number || `USDA-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-        title: (r.title || r.reason_for_recall || r.Description || "USDA Recall").slice(0, 200),
-        description: r.reason_for_recall || r.Description || "",
-        affected_models: affected.slice(0, 10),
-        recall_date: typeof recallDate === "string" ? recallDate.slice(0, 10) : new Date().toISOString().split("T")[0],
-        remedy_url: r.url || "",
-      };
-    });
-  } catch (error) {
-    console.error("USDA fetch error:", error);
-    return [];
-  }
+  return [];
 }
 
 interface HealthCanadaItem {
