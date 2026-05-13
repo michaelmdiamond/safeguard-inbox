@@ -3,6 +3,9 @@
 -- Adds user_aliases table, missing RLS policies, and indexes
 -- ============================================================
 
+-- Extension required for trigram indexes
+CREATE EXTENSION IF NOT EXISTS "pg_trgm";
+
 -- Table: User Aliases (maps email alias → user)
 CREATE TABLE user_aliases (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -29,6 +32,3 @@ CREATE POLICY "Users can update own inventory" ON user_inventory
 -- Index for text search pre-filtering on active_recalls
 CREATE INDEX idx_recalls_title_trgm ON active_recalls USING gin (title gin_trgm_ops);
 CREATE INDEX idx_recalls_description_trgm ON active_recalls USING gin (description gin_trgm_ops);
-
--- Enable trigram extension (needed for ILIKE index optimization)
-CREATE EXTENSION IF NOT EXISTS "pg_trgm";
