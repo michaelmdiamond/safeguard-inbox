@@ -1,3 +1,5 @@
+export const dynamic = "force-dynamic";
+
 import { createClient } from "@/lib/supabase/server";
 import { DashboardClient } from "@/components/dashboard/dashboard-client";
 import type { InventoryItem, UserAlert } from "@/types/database";
