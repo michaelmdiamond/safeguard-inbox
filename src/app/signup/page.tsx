@@ -1,5 +1,7 @@
 "use client";
 
+export const dynamic = "force-dynamic";
+
 import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -40,7 +42,7 @@ export default function SignupPage() {
       email,
       password,
       options: {
-        emailRedirectTo: `${window.location.origin}/auth/callback?next=/dashboard`,
+        emailRedirectTo: `${window.location.origin}/auth/callback?next=/onboarding`,
       },
     });
 
@@ -62,7 +64,7 @@ export default function SignupPage() {
       // Email confirmation required — redirect to verify page
       router.push("/verify-email");
     } else {
-      router.push("/dashboard");
+      router.push("/onboarding");
       router.refresh();
     }
   }
