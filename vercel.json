@@ -1,8 +1,3 @@
 {
-  "crons": [
-    {
-      "path": "/api/recalls/sync",
-      "schedule": "0 6 * * *"
-    }
-  ]
+  "comment": "App is deployed on Railway. See railway.toml and scripts/sync-recalls.sh."
 }
