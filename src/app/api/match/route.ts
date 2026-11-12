@@ -16,17 +16,19 @@ function getServiceClient() {
  * - A valid CRON_SECRET in the Authorization header (internal/server calls)
  * - A valid Supabase user session cookie (authenticated user triggering re-match)
  */
-async function verifyAuth(request: NextRequest): Promise<boolean> {
+type Caller = { kind: "cron" } | { kind: "user"; userId: string };
+
+async function verifyAuth(request: NextRequest): Promise<Caller | null> {
   // Check shared secret first (server-to-server)
   const cronSecret = process.env.CRON_SECRET;
   const auth = request.headers.get("authorization");
-  if (cronSecret && auth === `Bearer ${cronSecret}`) return true;
+  if (cronSecret && auth === `Bearer ${cronSecret}`) return { kind: "cron" };
 
   // Fall back to Supabase session check
   const { createClient: createServerClient } = await import("@/lib/supabase/server");
   const supabase = await createServerClient();
   const { data: { user } } = await supabase.auth.getUser();
-  return !!user;
+  return user ? { kind: "user", userId: user.id } : null;
 }
 
 /**
@@ -39,27 +41,29 @@ async function verifyAuth(request: NextRequest): Promise<boolean> {
  */
 export async function POST(request: NextRequest) {
   try {
-    if (!(await verifyAuth(request))) {
+    const caller = await verifyAuth(request);
+    if (!caller) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     const body = await request.json();
     const { inventory_item_id } = body;
 
-    if (!inventory_item_id) {
+    if (typeof inventory_item_id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(inventory_item_id)) {
       return NextResponse.json(
-        { error: "Missing inventory_item_id" },
+        { error: "Invalid inventory_item_id" },
         { status: 400 }
       );
     }
 
     const supabase = getServiceClient();
 
-    const { data: item, error: itemError } = await supabase
+    let inventoryQuery = supabase
       .from("user_inventory")
       .select("*")
-      .eq("id", inventory_item_id)
-      .single();
+      .eq("id", inventory_item_id);
+    if (caller.kind === "user") inventoryQuery = inventoryQuery.eq("user_id", caller.userId);
+    const { data: item, error: itemError } = await inventoryQuery.single();
 
     if (itemError || !item) {
       return NextResponse.json(
