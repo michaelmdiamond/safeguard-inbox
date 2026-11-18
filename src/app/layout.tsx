@@ -19,9 +19,13 @@ export const metadata: Metadata = {
   },
   description:
     "Automatically monitor your purchases for product recalls. Forward receipts, get instant alerts from CPSC, FDA, USDA, and NHTSA.",
-  metadataBase: new URL(
-    process.env.NEXT_PUBLIC_APP_URL || "https://safeguard-inbox.vercel.app"
-  ),
+  metadataBase: (() => {
+    try {
+      return new URL(process.env.NEXT_PUBLIC_APP_URL || "https://safeguard-inbox-production.up.railway.app");
+    } catch {
+      return new URL("https://safeguard-inbox-production.up.railway.app");
+    }
+  })(),
   openGraph: {
     title: "SafeGuard Inbox — Product Recall Safety Hub for Parents",
     description:
