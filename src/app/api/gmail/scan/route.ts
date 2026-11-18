@@ -1,3 +1,4 @@
+import { createClient as createServiceClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import {
@@ -23,8 +24,14 @@ export async function POST() {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  // Fetch Gmail connection
-  const { data: connection, error: connError } = await supabase
+  const service = createServiceClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!,
+    { auth: { persistSession: false, autoRefreshToken: false } }
+  );
+
+  // Fetch Gmail connection using server credentials, scoped to the authenticated user.
+  const { data: connection, error: connError } = await service
     .from("gmail_connections")
     .select("*")
     .eq("user_id", user.id)
@@ -42,7 +49,7 @@ export async function POST() {
   if (new Date(connection.token_expiry) <= new Date()) {
     const refreshed = await refreshGmailToken(connection.refresh_token);
     accessToken = refreshed.accessToken;
-    await supabase
+    await service
       .from("gmail_connections")
       .update({
         access_token: refreshed.accessToken,
@@ -98,7 +105,7 @@ export async function POST() {
   }
 
   // Mark as scanned
-  await supabase
+  await service
     .from("gmail_connections")
     .update({ scanned_at: new Date().toISOString() })
     .eq("user_id", user.id);

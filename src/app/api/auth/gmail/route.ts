@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { randomUUID } from "node:crypto";
 import { createClient } from "@/lib/supabase/server";
 
 export async function GET() {
@@ -13,6 +14,7 @@ export async function GET() {
     );
   }
 
+  const state = `${user.id}:${randomUUID()}`;
   const params = new URLSearchParams({
     client_id: process.env.GOOGLE_CLIENT_ID!,
     redirect_uri: process.env.GOOGLE_REDIRECT_URI!,
@@ -23,10 +25,18 @@ export async function GET() {
     ].join(" "),
     access_type: "offline",
     prompt: "consent",
-    state: user.id,
+    state,
   });
 
-  return NextResponse.redirect(
+  const response = NextResponse.redirect(
     `https://accounts.google.com/o/oauth2/v2/auth?${params}`
   );
+  response.cookies.set("gmail_oauth_state", state, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    path: "/api/auth/gmail",
+    maxAge: 600,
+  });
+  return response;
 }

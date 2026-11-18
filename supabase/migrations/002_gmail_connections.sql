@@ -11,11 +11,7 @@ CREATE TABLE gmail_connections (
 
 ALTER TABLE gmail_connections ENABLE ROW LEVEL SECURITY;
 
-CREATE POLICY "Users can view own gmail connection" ON gmail_connections
-    FOR SELECT USING (auth.uid() = user_id);
-
-CREATE POLICY "Users can insert own gmail connection" ON gmail_connections
-    FOR INSERT WITH CHECK (auth.uid() = user_id);
-
-CREATE POLICY "Users can update own gmail connection" ON gmail_connections
-    FOR UPDATE USING (auth.uid() = user_id);
+-- OAuth credentials are accessible only from authenticated server routes.
+-- Browser clients must never receive access or refresh tokens through the Data API.
+REVOKE ALL ON TABLE gmail_connections FROM anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE gmail_connections TO service_role;

@@ -1,8 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { createClient as createServiceClient } from "@supabase/supabase-js";
 import { getGmailEmail } from "@/lib/gmail";
 
 const appUrl = () => process.env.NEXT_PUBLIC_APP_URL!;
+
+function redirect(path: string) {
+  const response = NextResponse.redirect(`${appUrl()}${path}`);
+  response.cookies.set("gmail_oauth_state", "", {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    path: "/api/auth/gmail",
+    maxAge: 0,
+  });
+  return response;
+}
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
@@ -10,7 +23,7 @@ export async function GET(request: NextRequest) {
   const error = searchParams.get("error");
 
   if (error || !code) {
-    return NextResponse.redirect(`${appUrl()}/onboarding?error=gmail_denied`);
+    return redirect("/onboarding?error=gmail_denied");
   }
 
   const supabase = await createClient();
@@ -19,10 +32,17 @@ export async function GET(request: NextRequest) {
   } = await supabase.auth.getUser();
 
   if (!user) {
-    return NextResponse.redirect(`${appUrl()}/login`);
+    return redirect("/login");
   }
 
-  // Exchange authorization code for tokens
+  const state = searchParams.get("state");
+  const expectedState = request.cookies.get("gmail_oauth_state")?.value;
+  if (!state || !expectedState || state !== expectedState ||
+      !state.startsWith(`${user.id}:`)) {
+    return redirect("/onboarding?error=invalid_oauth_state");
+  }
+
+  // Exchange authorization code only after verifying the initiating browser/session.
   const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -36,21 +56,24 @@ export async function GET(request: NextRequest) {
   });
 
   if (!tokenRes.ok) {
-    return NextResponse.redirect(`${appUrl()}/onboarding?error=token_exchange`);
+    return redirect("/onboarding?error=token_exchange");
   }
 
   const tokens = await tokenRes.json();
 
   if (!tokens.refresh_token) {
     // Happens when user already granted access — revoke and retry
-    return NextResponse.redirect(
-      `${appUrl()}/api/auth/gmail`
-    );
+    return redirect("/api/auth/gmail");
   }
 
   const gmailEmail = await getGmailEmail(tokens.access_token);
 
-  const { error: upsertError } = await supabase
+  const service = createServiceClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!,
+    { auth: { persistSession: false, autoRefreshToken: false } }
+  );
+  const { error: upsertError } = await service
     .from("gmail_connections")
     .upsert(
       {
@@ -67,8 +90,8 @@ export async function GET(request: NextRequest) {
 
   if (upsertError) {
     console.error("Failed to save Gmail connection:", upsertError);
-    return NextResponse.redirect(`${appUrl()}/onboarding?error=save_failed`);
+    return redirect("/onboarding?error=save_failed");
   }
 
-  return NextResponse.redirect(`${appUrl()}/onboarding?connected=1`);
+  return redirect("/onboarding?connected=1");
 }
