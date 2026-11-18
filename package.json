@@ -21,7 +21,7 @@
     "clsx": "^2.1.1",
     "fastest-levenshtein": "^1.0.16",
     "lucide-react": "^0.577.0",
-    "next": "16.1.6",
+    "next": "16.4.6",
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "resend": "^6.9.3",
@@ -34,9 +34,12 @@
     "@types/react-dom": "^19",
     "@vitejs/plugin-react": "^5.1.4",
     "eslint": "^9",
-    "eslint-config-next": "16.1.6",
+    "eslint-config-next": "16.4.6",
     "tailwindcss": "^4",
     "typescript": "^5",
     "vitest": "^4.0.18"
+  },
+  "overrides": {
+    "minimatch": "11.0.8"
   }
 }
